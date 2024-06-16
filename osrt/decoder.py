@@ -31,13 +31,16 @@ class RayPredictor(nn.Module):
         else:
             self.output_mlp = None
 
-    def forward(self, z, x, rays):
+    def forward(self, z, x, rays, z_masks=None):
         """
         Args:
             z: scene encoding [batch_size, num_patches, patch_dim]
             x: query camera positions [batch_size, num_rays, 3]
             rays: query ray directions [batch_size, num_rays, 3]
         """
+        if z_masks is not None:
+            z = z_masks.unsqueeze(-1) * z
+        
         queries = self.query_encoder(x, rays)
         if self.input_mlp is not None:
             queries = self.input_mlp(queries)
@@ -130,6 +133,24 @@ class SlotMixerDecoder(nn.Module):
 
     def forward(self, slot_latents, camera_pos, rays, **kwargs):
         x, query_rays = self.allocation_transformer(slot_latents, camera_pos, rays)
+        slot_mix, slot_weights = self.mixing_block(x, slot_latents)
+        pixels = self.render_mlp(torch.cat((slot_mix, query_rays), -1))
+        return pixels, {'segmentation': slot_weights}
+    
+class SlotMixerDecoderDynSlots(nn.Module):
+    """ The Slot Mixer Decoder proposed in the OSRT paper. """
+    def __init__(self, num_att_blocks=2, pos_start_octave=0, layer_norm=False):
+        super().__init__()
+        self.allocation_transformer = RayPredictor(num_att_blocks=num_att_blocks,
+                                                   pos_start_octave=pos_start_octave,
+                                                   input_mlp=True, z_dim=1536)
+        self.mixing_block = MixingBlock(layer_norm=layer_norm)
+        # Leaky ReLU! negative_slope = 0.01
+        # Sigmoid am Ende.
+        self.render_mlp = RenderMLP()
+
+    def forward(self, slot_latents, slot_masks, camera_pos, rays, **kwargs):
+        x, query_rays = self.allocation_transformer(slot_latents, camera_pos, rays, slot_masks)
         slot_mix, slot_weights = self.mixing_block(x, slot_latents)
         pixels = self.render_mlp(torch.cat((slot_mix, query_rays), -1))
         return pixels, {'segmentation': slot_weights}

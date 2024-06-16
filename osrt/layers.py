@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import numpy as np
+import torch.nn.functional as F
 
 import math
 from einops import rearrange
@@ -251,4 +252,132 @@ class SlotAttention(nn.Module):
 
         return slots
 
+class SlotAttention2(nn.Module):
+    """
+    Slot Attention as introduced by Locatello et al.
+    """
+    def __init__(self, num_slots, input_dim=768, slot_dim=1536, hidden_dim=3072, iters=3, eps=1e-8,
+                 randomize_initial_slots=False):
+        super().__init__()
 
+        self.num_slots = num_slots
+        self.iters = iters
+        self.scale = slot_dim ** -0.5
+        self.slot_dim = slot_dim
+
+        self.randomize_initial_slots = randomize_initial_slots
+        self.initial_slots = nn.Parameter(torch.randn(num_slots, slot_dim))
+
+        self.eps = eps
+
+        self.to_q = JaxLinear(slot_dim, slot_dim, bias=False)
+        self.to_k = JaxLinear(input_dim, slot_dim, bias=False)
+        self.to_v = JaxLinear(input_dim, slot_dim, bias=False)
+
+        self.gru = nn.GRUCell(slot_dim, slot_dim)
+
+        self.mlp = nn.Sequential(
+            JaxLinear(slot_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            JaxLinear(hidden_dim, slot_dim)
+        )
+
+        self.norm_input   = nn.LayerNorm(input_dim)
+        self.norm_slots   = nn.LayerNorm(slot_dim)
+        self.norm_pre_mlp = nn.LayerNorm(slot_dim)
+
+    def forward(self, inputs):
+        """
+        Args:
+            inputs: set-latent representation [batch_size, num_inputs, dim]
+        """
+        batch_size, num_inputs, dim = inputs.shape
+
+        inputs = self.norm_input(inputs)
+        if self.randomize_initial_slots:
+            slot_means = self.initial_slots.unsqueeze(0).expand(batch_size, -1, -1)
+            slots = torch.distributions.Normal(slot_means, self.embedding_stdev).rsample()
+        else:
+            slots = self.initial_slots.unsqueeze(0).expand(batch_size, -1, -1)
+
+        k, v = self.to_k(inputs), self.to_v(inputs)
+
+        for _ in range(self.iters):
+            slots_prev = slots
+            norm_slots = self.norm_slots(slots)
+
+            q = self.to_q(norm_slots)
+
+            dots = torch.einsum('bid,bjd->bij', q, k) * self.scale
+            # shape: [batch_size, num_slots, num_inputs]
+            attn = dots.softmax(dim=1) + self.eps
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+            updates = torch.einsum('bjd,bij->bid', v, attn)
+
+            slots = self.gru(updates.flatten(0, 1), slots_prev.flatten(0, 1))
+            slots = slots.reshape(batch_size, self.num_slots, self.slot_dim)
+            slots = slots + self.mlp(self.norm_pre_mlp(slots))
+
+        return slots, attn
+
+class MeanFieldSampling(nn.Module):
+    def __init__(self, slot_dim, num_slots):
+        super(MeanFieldSampling, self).__init__()
+        self.num_slots = num_slots
+        self.slot_predictor = nn.Linear(slot_dim, slot_dim)
+        self.slot_predictor2 = nn.Linear(slot_dim, 2)
+
+    def forward(self, slots):
+        logits = self.slot_predictor(slots)  # (batch_size, num_slots, slot_dim)
+        logits = self.slot_predictor2(logits) # (batch_size, num_slots, slot_dim)
+        keep_probs = F.softmax(logits, dim=-1)  # (batch_size, num_slots, 2)
+
+        # Gumbel-Softmax
+        sampled_slots = F.gumbel_softmax(keep_probs, tau=0.1, hard=True)
+
+        slot_masks = sampled_slots[..., 1].float()  # (batch_size, num_slots)
+
+        return slot_masks
+
+class SlotSelection(nn.Module):
+    def __init__(self, slot_dim, num_slots):
+        super().__init__()
+        self.mean_field_sampling = MeanFieldSampling(slot_dim, num_slots)
+
+    def forward(self, slots):
+        slot_masks = self.mean_field_sampling(slots)
+        return slot_masks
+
+class SlotSelection2(nn.Module):
+    def __init__(self, slot_dim, num_slots):
+        super().__init__()
+        self.to_q = torch.nn.Linear(slot_dim, slot_dim)
+        self.to_k = torch.nn.Linear(slot_dim, slot_dim)
+        self.slot_predictor = MeanFieldSampling(slot_dim, num_slots)
+
+
+    def forward(self, slots, fg_slot):
+        q = self.to_q(slots)
+        k = self.to_k(fg_slot)
+        attention_scores = torch.bmm(q, k.transpose(1,2))
+        attention_weights = F.softmax(attention_scores, dim=-1).squeeze(1) # (batch_size, num_slots)
+        slot_masks = self.slot_predictor(slots*attention_weights)
+        return slot_masks
+
+class LossNumberSlots(nn.Module):
+    def __init__(self, lambda_reg = 0.001):
+        super().__init__()
+        self.lambda_reg = lambda_reg
+
+    def forward(self, slot_masks):
+        expectation = slot_masks.mean(dim=1)
+        l_reg = expectation.sum()
+        return  -self.lambda_reg * l_reg
+    
+def background_loss(slot_attention_weights, background_slot_index=0, lambda_reg = 0.001):
+
+    background_slot_weights = slot_attention_weights[:, background_slot_index, :]
+    l2_norm = torch.norm(background_slot_weights, dim=1)
+    regularization_loss = lambda_reg * torch.mean(l2_norm**2)
+
+    return regularization_loss

@@ -6,6 +6,7 @@ import osrt.utils.visualize as vis
 from osrt.utils.common import mse2psnr, reduce_dict, gather_all, compute_adjusted_rand_index
 from osrt.utils import nerf
 from osrt.utils.common import get_rank, get_world_size
+from osrt.layers import LossNumberSlots, background_loss
 
 import os
 import math
@@ -24,6 +25,8 @@ class SRTTrainer:
             self.render_kwargs['num_coarse_samples'] = cfg['training']['num_coarse_samples']
         if 'num_fine_samples' in cfg['training']:
             self.render_kwargs['num_fine_samples'] = cfg['training']['num_fine_samples']
+
+        self.num_slot_loss = LossNumberSlots()
 
     def evaluate(self, val_loader, **kwargs):
         ''' Performs an evaluation.
@@ -73,7 +76,12 @@ class SRTTrainer:
         input_rays = data.get('input_rays').to(device)
         target_pixels = data.get('target_pixels').to(device)
 
-        z = self.model.encoder(input_images, input_camera_pos, input_rays)
+        if self.config["model"]["encoder"] == "osrt_dyn":
+            z, z_masks = self.model.encoder(input_images, input_camera_pos, input_rays)
+        elif self.config["model"]["encoder"] == "osrt_dyn_attn":
+            z, z_masks, z2_weights = self.model.encoder(input_images, input_camera_pos, input_rays)
+        else:
+            z = self.model.encoder(input_images, input_camera_pos, input_rays)
 
         target_camera_pos = data.get('target_camera_pos').to(device)
         target_rays = data.get('target_rays').to(device)
@@ -81,7 +89,11 @@ class SRTTrainer:
         loss = 0.
         loss_terms = dict()
 
-        pred_pixels, extras = self.model.decoder(z, target_camera_pos, target_rays, **self.render_kwargs)
+        if self.config["model"]["decoder"] == "slot_mixer_dyn":
+            pred_pixels, extras = self.model.decoder(z, z_masks, target_camera_pos, target_rays, **self.render_kwargs)
+        else:
+            pred_pixels, extras = self.model.decoder(z, target_camera_pos, target_rays, **self.render_kwargs)
+
 
         loss = loss + ((pred_pixels - target_pixels)**2).mean((1, 2))
         loss_terms['mse'] = loss
@@ -101,8 +113,15 @@ class SRTTrainer:
 
             loss_terms['fg_ari'] = compute_adjusted_rand_index(true_seg.transpose(1, 2)[:, 1:],
                                                                pred_seg.transpose(1, 2))
+        total_loss = 0.
+        total_loss += loss
+        
+        if "osrt_dyn" in self.config["model"]["encoder"]:
+            total_loss += self.num_slot_loss(z_masks)
+        if self.config["model"]["encoder"] == "osrt_dyn_attn":
+            total_loss += background_loss(z2_weights)
 
-        return loss, loss_terms
+        return total_loss, loss_terms
 
     def eval_step(self, data, full_scale=False):
         with torch.no_grad():
@@ -134,6 +153,13 @@ class SRTTrainer:
                 z, camera_pos[:, i:i+max_num_rays], rays[:, i:i+max_num_rays],
                 **render_kwargs)
             all_extras.append(extras)
+
+            if self.config["model"]["decoder"] == "slot_mixer_dyn":
+                img[:, i:i+max_num_rays], extras = self.model.decoder(z, z_masks, camera_pos[:, i:i+max_num_rays], rays[:, i:i+max_num_rays],
+                **render_kwargs)
+            else:
+                img[:, i:i+max_num_rays], extras = self.model.decoder(z, camera_pos[:, i:i+max_num_rays], rays[:, i:i+max_num_rays],
+                **render_kwargs)
 
         agg_extras = {}
         for key in all_extras[0]:
@@ -171,9 +197,13 @@ class SRTTrainer:
 
             input_images_np = np.transpose(input_images.cpu().numpy(), (0, 1, 3, 4, 2))
 
-            z = self.model.encoder(input_images, input_camera_pos, input_rays)
-
-            batch_size, num_input_images, height, width, _ = input_rays.shape
+            if self.config["model"]["encoder"] == "osrt_dyn":
+                z, z_masks = self.model.encoder(input_images, input_camera_pos, input_rays)
+            elif self.config["model"]["encoder"] == "osrt_dyn_attn":
+                z, z_masks, z2_weights = self.model.encoder(input_images, input_camera_pos, input_rays)
+            else:
+                z = self.model.encoder(input_images, input_camera_pos, input_rays)
+                batch_size, num_input_images, height, width, _ = input_rays.shape
 
             num_angles = 6
 

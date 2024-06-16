@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from osrt.layers import RayEncoder, Transformer, SlotAttention
+from osrt.layers import RayEncoder, Transformer, SlotAttention, SlotAttention2, SlotSelection, SlotSelection2
 
 
 class SRTConvBlock(nn.Module):
@@ -87,9 +87,48 @@ class OSRTEncoder(nn.Module):
                                             randomize_initial_slots=randomize_initial_slots)
 
     def forward(self, images, camera_pos, rays):
-        #some comment
         set_latents = self.srt_encoder(images, camera_pos, rays)
         slot_latents = self.slot_attention(set_latents)
         return slot_latents
 
 
+class OSRTEncoderDynSlots(nn.Module):
+    def __init__(self, pos_start_octave=0, num_slots=6, slot_dim=1536, slot_iters=1,
+                 randomize_initial_slots=False):
+        super().__init__()
+        self.srt_encoder = ImprovedSRTEncoder(num_conv_blocks=3, num_att_blocks=5,
+                                             pos_start_octave=pos_start_octave)
+
+        self.slot_attention = SlotAttention(num_slots, slot_dim=slot_dim, iters=slot_iters,
+                                            randomize_initial_slots=randomize_initial_slots)
+        self.slot_selection = SlotSelection(slot_dim, num_slots)
+
+    def forward(self, images, camera_pos, rays):
+        set_latents = self.srt_encoder(images, camera_pos, rays)
+        slot_latents = self.slot_attention(set_latents)
+        slot_masks = self.slot_selection(slot_latents)
+        return slot_latents, slot_masks
+
+    
+class OSRTEncoderAttentionDynSlots(nn.Module):
+    def __init__(self, pos_start_octave=0, num_slots=6, slot_dim=1536, slot_iters=1,
+                 randomize_initial_slots=False):
+        super().__init__()
+        self.srt_encoder = ImprovedSRTEncoder(num_conv_blocks=3, num_att_blocks=5,
+                                             pos_start_octave=pos_start_octave)
+
+        self.slot_attention = SlotAttention(num_slots, slot_dim=slot_dim, iters=slot_iters,
+                                            randomize_initial_slots=randomize_initial_slots)
+        self.slot_attention2 = SlotAttention2(2, slot_dim=slot_dim, iters=slot_iters,
+                                             randomize_initial_slots=randomize_initial_slots)
+        self.slot_selection = SlotSelection2(slot_dim, num_slots)
+
+    def forward(self, images, camera_pos, rays):
+        set_latents = self.srt_encoder(images, camera_pos, rays)
+        slot_latents = self.slot_attention(set_latents)
+        slot_latents2, weights = self.slot_attention2(set_latents)
+        slot_masks = self.slot_selection(slot_latents, slot_latents2[:, 0, :].unsqueeze(1))
+        slot_latents = slot_masks.unsqueeze(-1) * slot_latents
+        slot_latents = torch.cat((slot_latents, slot_latents2[:,1,:].unsqueeze(1)), dim=1)
+
+        return slot_latents, slot_masks, weights

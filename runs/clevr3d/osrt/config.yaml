@@ -5,7 +5,7 @@ data:
   kwargs:
     downsample: 1
 model:
-  encoder: osrt
+  encoder: osrt_dyn_attn
   encoder_kwargs:
     pos_start_octave: -5
     num_slots: 6

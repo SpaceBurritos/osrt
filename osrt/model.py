@@ -1,7 +1,7 @@
 from torch import nn
 
-from osrt.encoder import OSRTEncoder, ImprovedSRTEncoder
-from osrt.decoder import SlotMixerDecoder, SpatialBroadcastDecoder, ImprovedSRTDecoder
+from osrt.encoder import OSRTEncoder, ImprovedSRTEncoder, OSRTEncoderDynSlots, OSRTEncoderAttentionDynSlots
+from osrt.decoder import SlotMixerDecoder, SpatialBroadcastDecoder, ImprovedSRTDecoder, SlotMixerDecoderDynSlots
 
 import osrt.layers as layers
 
@@ -17,6 +17,10 @@ class OSRT(nn.Module):
             self.encoder = ImprovedSRTEncoder(**cfg['encoder_kwargs'])
         elif encoder_type == 'osrt':
             self.encoder = OSRTEncoder(**cfg['encoder_kwargs'])
+        elif encoder_type == "osrt_dyn":
+            self.encoder = OSRTEncoderDynSlots(**cfg['encoder_kwargs'])
+        elif encoder_type == "osrt_dyn_attn":
+            self.encoder = OSRTEncoderAttentionDynSlots(**cfg['encoder_kwargs'])
         else:
             raise ValueError(f'Unknown encoder type: {encoder_type}')
 
@@ -27,6 +31,8 @@ class OSRT(nn.Module):
             self.decoder = ImprovedSRTDecoder(**cfg['decoder_kwargs'])
         elif decoder_type == 'slot_mixer':
             self.decoder = SlotMixerDecoder(**cfg['decoder_kwargs'])
+        elif decoder_type == 'slot_mixer_dyn':
+            self.decoder = SlotMixerDecoderDynSlots(**cfg['decoder_kwargs'])
         else:
             raise ValueError(f'Unknown decoder type: {decoder_type}')
 
