@@ -87,6 +87,7 @@ class OSRTEncoder(nn.Module):
                                             randomize_initial_slots=randomize_initial_slots)
 
     def forward(self, images, camera_pos, rays):
+        #some comment
         set_latents = self.srt_encoder(images, camera_pos, rays)
         slot_latents = self.slot_attention(set_latents)
         return slot_latents
