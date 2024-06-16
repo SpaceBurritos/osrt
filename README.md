@@ -1,3 +1,20 @@
+# AI 602 Project
+
+In `runs/clevr3d/osrt/configs.yaml`
+
+If you want to run the DynSlots implementation change:
+
+ ```yaml
+encoder: osrt_dyn
+decoder: slot_mixer_dyn
+ ```
+
+For the Attention-DynSlots change:
+
+ ```yaml
+encoder: osrt_dyn_attn
+ ```
+
 # OSRT: Object Scene Representation Transformer
 
 This is an independent PyTorch implementation of OSRT, as presented in the paper
